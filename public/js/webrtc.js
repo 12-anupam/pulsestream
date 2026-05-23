@@ -1,15 +1,17 @@
-// PulseStream WebRTC Manager
-// Host streams to each viewer via individual peer connections
+// PulseStream WebRTC Manager - Fixed for cross-network streaming
 
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
+    // Free reliable TURN servers
     {
       urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:80?transport=tcp',
       username: 'openrelayproject',
       credential: 'openrelayproject'
     },
@@ -23,7 +25,8 @@ const ICE_SERVERS = {
       username: 'openrelayproject',
       credential: 'openrelayproject'
     }
-  ]
+  ],
+  iceCandidatePoolSize: 10
 };
 
 class WebRTCManager {
@@ -40,17 +43,26 @@ class WebRTCManager {
 
   setRole(role) { this.role = role; }
 
-  // HOST: send stream to a new viewer
+  // HOST: create offer for a specific viewer
   async createOfferForViewer(viewerId) {
-    console.log('[WebRTC] Creating offer for viewer:', viewerId);
+    console.log('[RTC] Creating offer for', viewerId);
+
+    // Close existing connection if any
+    if (this.peerConnections.has(viewerId)) {
+      this.peerConnections.get(viewerId).close();
+    }
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
     this.peerConnections.set(viewerId, pc);
 
+    // Add tracks
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
+        console.log('[RTC] Adding track:', track.kind, track.label);
         pc.addTrack(track, this.localStream);
-        console.log('[WebRTC] Added track:', track.kind);
       });
+    } else {
+      console.warn('[RTC] No localStream when creating offer!');
     }
 
     pc.onicecandidate = (e) => {
@@ -60,56 +72,62 @@ class WebRTCManager {
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log('[WebRTC Host] ICE state:', pc.iceConnectionState, 'for', viewerId);
+      console.log('[RTC Host] ICE:', pc.iceConnectionState, viewerId);
       if (pc.iceConnectionState === 'failed') {
+        console.log('[RTC] Restarting ICE for', viewerId);
         pc.restartIce();
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log('[WebRTC Host] Connection state:', pc.connectionState);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        this.peerConnections.delete(viewerId);
-      }
+      console.log('[RTC Host] Connection:', pc.connectionState, viewerId);
     };
 
     try {
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false
+      });
       await pc.setLocalDescription(offer);
-      this.socket.emit('webrtc-offer', { to: viewerId, offer });
-      console.log('[WebRTC] Offer sent to', viewerId);
+      this.socket.emit('webrtc-offer', { to: viewerId, offer: pc.localDescription });
+      console.log('[RTC] Offer sent to', viewerId);
     } catch(e) {
-      console.error('[WebRTC] Offer error:', e);
+      console.error('[RTC] createOffer error:', e);
     }
+
     return pc;
   }
 
   // HOST: handle answer from viewer
   async handleAnswer(viewerId, answer) {
     const pc = this.peerConnections.get(viewerId);
-    if (!pc) return;
+    if (!pc) { console.warn('[RTC] No PC for viewer', viewerId); return; }
     try {
       if (pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        console.log('[WebRTC] Answer set for', viewerId);
+        console.log('[RTC] Answer accepted from', viewerId);
       }
     } catch(e) {
-      console.error('[WebRTC] Answer error:', e);
+      console.error('[RTC] setRemoteDescription error:', e);
     }
   }
 
-  // HOST: ICE from viewer
+  // HOST: ICE candidate from viewer
   async handleIceFromViewer(viewerId, candidate) {
     const pc = this.peerConnections.get(viewerId);
     if (!pc) return;
-    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch(e) {}
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch(e) { /* ignore */ }
   }
 
   // VIEWER: handle offer from host
   async handleOffer(hostId, offer) {
-    console.log('[WebRTC Viewer] Got offer from host');
-    const existing = this.peerConnections.get(hostId);
-    if (existing) { existing.close(); }
+    console.log('[RTC Viewer] Got offer from host');
+
+    if (this.peerConnections.has(hostId)) {
+      this.peerConnections.get(hostId).close();
+    }
 
     const pc = new RTCPeerConnection(ICE_SERVERS);
     this.peerConnections.set(hostId, pc);
@@ -121,20 +139,29 @@ class WebRTCManager {
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log('[WebRTC Viewer] ICE state:', pc.iceConnectionState);
-    };
-
-    pc.ontrack = (e) => {
-      console.log('[WebRTC Viewer] Got track:', e.track.kind);
-      if (e.streams && e.streams[0]) {
-        if (this.onRemoteStream) this.onRemoteStream(e.streams[0]);
-      }
+      console.log('[RTC Viewer] ICE:', pc.iceConnectionState);
     };
 
     pc.onconnectionstatechange = () => {
-      console.log('[WebRTC Viewer] Connection:', pc.connectionState);
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      console.log('[RTC Viewer] Connection:', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        console.log('[RTC Viewer] ✅ Connected to host!');
+      }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
         if (this.onStreamEnded) this.onStreamEnded();
+      }
+    };
+
+    // This fires when host's video/audio arrives
+    pc.ontrack = (e) => {
+      console.log('[RTC Viewer] ✅ Got track:', e.track.kind, 'streams:', e.streams.length);
+      if (e.streams && e.streams[0]) {
+        console.log('[RTC Viewer] Stream has tracks:', e.streams[0].getTracks().map(t=>t.kind));
+        if (this.onRemoteStream) this.onRemoteStream(e.streams[0]);
+      } else {
+        // fallback: build stream from track directly
+        const stream = new MediaStream([e.track]);
+        if (this.onRemoteStream) this.onRemoteStream(stream);
       }
     };
 
@@ -142,10 +169,10 @@ class WebRTCManager {
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      this.socket.emit('webrtc-answer', { to: hostId, answer });
-      console.log('[WebRTC Viewer] Answer sent');
+      this.socket.emit('webrtc-answer', { to: hostId, answer: pc.localDescription });
+      console.log('[RTC Viewer] Answer sent');
     } catch(e) {
-      console.error('[WebRTC Viewer] Error:', e);
+      console.error('[RTC Viewer] Error:', e);
     }
   }
 
@@ -153,10 +180,12 @@ class WebRTCManager {
   async handleIceFromHost(hostId, candidate) {
     const pc = this.peerConnections.get(hostId);
     if (!pc) return;
-    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch(e) {}
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch(e) { /* ignore */ }
   }
 
-  // HOST: rebuild combined stream from screen + cam
+  // HOST: combine screen + cam into one stream
   buildLocalStream() {
     const tracks = [];
     if (this.screenStream) {
@@ -165,44 +194,55 @@ class WebRTCManager {
     }
     if (this.camStream) {
       if (!this.screenStream) {
+        // No screen share: use cam video
         this.camStream.getVideoTracks().forEach(t => tracks.push(t));
       }
-      this.camStream.getAudioTracks().forEach(t => tracks.push(t));
+      // Always add cam audio if no screen audio
+      if (!this.screenStream || this.screenStream.getAudioTracks().length === 0) {
+        this.camStream.getAudioTracks().forEach(t => tracks.push(t));
+      }
     }
-    this.localStream = tracks.length > 0 ? new MediaStream(tracks) : null;
-    console.log('[WebRTC] Local stream tracks:', tracks.map(t => t.kind));
+    if (tracks.length > 0) {
+      this.localStream = new MediaStream(tracks);
+      console.log('[RTC] Built localStream:', tracks.map(t => t.kind + ':' + t.label));
+    } else {
+      this.localStream = null;
+      console.warn('[RTC] No tracks for localStream');
+    }
   }
 
-  // HOST: push updated tracks to all viewers
+  // HOST: push new tracks to all connected viewers
   async updateAllViewers() {
-    if (!this.localStream) return;
+    if (!this.localStream) {
+      console.warn('[RTC] updateAllViewers: no localStream');
+      return;
+    }
+    console.log('[RTC] Updating', this.peerConnections.size, 'viewers');
+
     for (const [viewerId, pc] of this.peerConnections.entries()) {
       try {
         const senders = pc.getSenders();
-        const tracks = this.localStream.getTracks();
+        const newTracks = this.localStream.getTracks();
 
-        for (const track of tracks) {
-          const sender = senders.find(s => s.track && s.track.kind === track.kind);
-          if (sender) {
-            await sender.replaceTrack(track);
+        for (const track of newTracks) {
+          const existingSender = senders.find(s => s.track && s.track.kind === track.kind);
+          if (existingSender) {
+            await existingSender.replaceTrack(track);
+            console.log('[RTC] Replaced track', track.kind, 'for', viewerId);
           } else {
             pc.addTrack(track, this.localStream);
-            // renegotiate
+            console.log('[RTC] Added new track', track.kind, 'for', viewerId);
+            // Renegotiate
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            this.socket.emit('webrtc-offer', { to: viewerId, offer });
+            this.socket.emit('webrtc-offer', { to: viewerId, offer: pc.localDescription });
           }
         }
       } catch(e) {
-        console.error('[WebRTC] Update error for', viewerId, e);
+        console.error('[RTC] updateAllViewers error for', viewerId, e);
+        // If update fails, create fresh offer
+        await this.createOfferForViewer(viewerId);
       }
-    }
-  }
-
-  // HOST: send stream to ALL current viewers (call after going live)
-  async sendToAllViewers(viewerIds) {
-    for (const id of viewerIds) {
-      await this.createOfferForViewer(id);
     }
   }
 

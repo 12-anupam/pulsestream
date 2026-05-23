@@ -13,13 +13,13 @@ let uptimeInterval = null;
 let streamStartTime = null;
 let polls = [];
 let myVotes = {};
-let connectedViewerIds = [];
+let waitingViewers = []; // viewers who joined before host went live
 
 const rtc = new WebRTCManager(socket);
 
-// ── CONNECT ──────────────────────────────────────────────────────────────────
+// ── CONNECT ───────────────────────────────────────────────────────────────────
 socket.on('connect', () => {
-  log('Connected to server');
+  console.log('[App] Connected:', socket.id);
   document.getElementById('loadingMsg').textContent = 'Establishing session...';
 });
 
@@ -33,7 +33,7 @@ socket.on('role', (data) => {
     document.getElementById('mainNav').classList.remove('hidden');
     document.getElementById('mainApp').classList.remove('hidden');
     setupUI();
-  }, 500);
+  }, 400);
 });
 
 socket.on('stream-state', (state) => {
@@ -43,28 +43,31 @@ socket.on('stream-state', (state) => {
 socket.on('chat-history', (msgs) => msgs.forEach(appendChat));
 socket.on('polls-update', (data) => { polls = data; renderPolls(); });
 
-// ── SETUP UI ─────────────────────────────────────────────────────────────────
+// ── SETUP UI ──────────────────────────────────────────────────────────────────
 function setupUI() {
   const badge = document.getElementById('roleBadge');
   if (myRole === 'host') {
     badge.textContent = '⚡ HOST';
     badge.className = 'role-badge host';
     document.querySelectorAll('.host-only').forEach(el => el.classList.remove('hidden'));
-    document.getElementById('stagePlaceholderText').textContent = 'You\'re not live yet — hit ⚡ Go Live!';
+    document.getElementById('stagePlaceholderText').textContent = 'Turn on 📷 Camera or 🖥 Screen, then hit ⚡ Go Live!';
   } else {
     badge.textContent = '👁 VIEWER';
     badge.className = 'role-badge viewer';
-    document.getElementById('stagePlaceholderText').textContent = 'Stream hasn\'t started yet. Hang tight!';
+    document.getElementById('stagePlaceholderText').textContent = 'Stream hasn\'t started yet. Hang tight! 👀';
   }
 
   // Viewer: receive stream
   rtc.onRemoteStream = (stream) => {
-    log('Got remote stream, tracks:', stream.getTracks().map(t=>t.kind));
+    console.log('[App] Received remote stream, tracks:', stream.getTracks().map(t => t.kind));
     const vid = document.getElementById('remoteVideo');
     vid.srcObject = stream;
     vid.style.display = 'block';
-    vid.play().catch(e => log('Play error:', e));
     document.getElementById('stagePlaceholder').style.display = 'none';
+    vid.play().catch(e => {
+      console.warn('[App] Autoplay blocked, showing play button');
+      showPlayButton(vid);
+    });
   };
 
   rtc.onStreamEnded = () => {
@@ -73,29 +76,61 @@ function setupUI() {
   };
 }
 
-// ── HOST: GO LIVE ────────────────────────────────────────────────────────────
+// Show manual play button if autoplay is blocked (common on mobile)
+function showPlayButton(vid) {
+  const existing = document.getElementById('playBtn');
+  if (existing) return;
+  const btn = document.createElement('button');
+  btn.id = 'playBtn';
+  btn.textContent = '▶ Tap to Watch';
+  btn.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20;padding:14px 28px;background:#7c5cfc;color:#fff;border:none;border-radius:10px;font-size:16px;font-family:Syne,sans-serif;font-weight:700;cursor:pointer';
+  btn.onclick = () => { vid.play(); btn.remove(); };
+  document.getElementById('stage').appendChild(btn);
+}
+
+// ── HOST: GO LIVE MODAL ───────────────────────────────────────────────────────
 function openGoLiveModal() {
   document.getElementById('goLiveModal').classList.remove('hidden');
   setTimeout(() => document.getElementById('inputTitle').focus(), 100);
 }
 
-function startStream() {
+async function startStream() {
   const title = document.getElementById('inputTitle').value.trim() || 'My Live Stream';
   const category = document.getElementById('inputCategory').value;
-  socket.emit('start-stream', { title, category });
+
+  // Auto-start camera if nothing is on yet
+  if (!camEnabled && !screenEnabled) {
+    showToast('📷 Starting camera...');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      rtc.camStream = stream;
+      document.getElementById('camVideo').srcObject = stream;
+      document.getElementById('camBtn').classList.add('active');
+      camEnabled = true;
+      const sv = document.getElementById('screenVideo');
+      sv.srcObject = stream;
+      sv.style.display = 'block';
+      document.getElementById('stagePlaceholder').style.display = 'none';
+      rtc.buildLocalStream();
+    } catch(e) {
+      console.warn('[App] Camera auto-start failed:', e);
+      // continue anyway
+    }
+  }
+
   closeModal('goLiveModal');
+  socket.emit('start-stream', { title, category });
 }
 
 socket.on('stream-started', async (state) => {
   applyStreamStarted(state);
   if (myRole === 'host') {
-    showToast('🔴 You are now LIVE!');
+    showToast('🔴 You are LIVE!');
     appendSystemMsg('Stream started! Welcome everyone 👋');
-    // Send stream to any viewers already waiting
-    if (rtc.localStream && connectedViewerIds.length > 0) {
-      for (const id of connectedViewerIds) {
-        await rtc.createOfferForViewer(id);
-      }
+    // Send to any viewers already waiting
+    console.log('[App] Going live, waiting viewers:', waitingViewers.length);
+    for (const id of waitingViewers) {
+      await rtc.createOfferForViewer(id);
     }
   } else {
     showToast('🎉 Stream just started!');
@@ -112,7 +147,7 @@ function applyStreamStarted(state) {
   document.getElementById('timePill').classList.remove('hidden');
   document.getElementById('liveBadge').classList.remove('hidden');
   document.getElementById('statusDot').classList.add('live');
-  document.getElementById('statusLabel').textContent = myRole === 'host' ? 'LIVE' : 'Watching';
+  document.getElementById('statusLabel').textContent = myRole === 'host' ? '● LIVE' : 'Watching';
   if (myRole === 'host') {
     document.getElementById('goLiveBtn').classList.add('hidden');
     document.getElementById('stopBtn').classList.remove('hidden');
@@ -126,7 +161,7 @@ function applyStreamStarted(state) {
   }, 1000);
 }
 
-// ── HOST: STOP ───────────────────────────────────────────────────────────────
+// ── HOST: STOP STREAM ─────────────────────────────────────────────────────────
 function stopStream() {
   if (!confirm('End the stream?')) return;
   socket.emit('stop-stream');
@@ -149,9 +184,11 @@ socket.on('stream-stopped', () => {
     document.getElementById('camPip').classList.add('hidden');
     document.getElementById('screenBadge').classList.add('hidden');
     document.getElementById('stagePlaceholder').style.display = 'flex';
+    document.getElementById('stagePlaceholderText').textContent = 'Turn on 📷 Camera or 🖥 Screen, then hit ⚡ Go Live!';
     document.getElementById('screenBtn').classList.remove('active');
     document.getElementById('camBtn').classList.remove('active');
     screenEnabled = false; camEnabled = false;
+    waitingViewers = [];
   } else {
     document.getElementById('remoteVideo').style.display = 'none';
     document.getElementById('stagePlaceholder').style.display = 'flex';
@@ -164,19 +201,22 @@ socket.on('host-disconnected', () => {
   showToast('Host has disconnected');
 });
 
-// ── HOST: VIEWERS ────────────────────────────────────────────────────────────
+// ── HOST: VIEWER MANAGEMENT ───────────────────────────────────────────────────
 socket.on('viewer-joined', async ({ id, name, color }) => {
   if (myRole !== 'host') return;
-  connectedViewerIds.push(id);
   appendSystemMsg(`👤 ${name} joined`);
   if (isLive && rtc.localStream) {
+    console.log('[App] Viewer joined while live, sending stream to', id);
     await rtc.createOfferForViewer(id);
+  } else {
+    console.log('[App] Viewer joined before live, queuing:', id);
+    waitingViewers.push(id);
   }
 });
 
 socket.on('viewer-left', ({ id, name }) => {
   if (myRole !== 'host') return;
-  connectedViewerIds = connectedViewerIds.filter(v => v !== id);
+  waitingViewers = waitingViewers.filter(v => v !== id);
   rtc.removeViewer(id);
   appendSystemMsg(`👋 ${name} left`);
 });
@@ -187,11 +227,12 @@ socket.on('viewer-count', (count) => {
   document.getElementById('chatViewerCount').textContent = count + ' viewer' + (count !== 1 ? 's' : '');
 });
 
-// ── WEBRTC SIGNALING ─────────────────────────────────────────────────────────
+// ── WEBRTC SIGNALING ──────────────────────────────────────────────────────────
 socket.on('webrtc-offer', async ({ from, offer }) => {
   if (myRole === 'viewer') {
     await rtc.handleOffer(from, offer);
   } else if (myRole === 'host') {
+    // Renegotiation answer
     await rtc.handleAnswer(from, offer);
   }
 });
@@ -219,39 +260,38 @@ function toggleMic() {
 
 // ── HOST: CAMERA ──────────────────────────────────────────────────────────────
 async function toggleCam() {
-  if (!isLive) { showToast('⚠️ Go live first!'); return; }
   if (camEnabled) {
     if (rtc.camStream) { rtc.camStream.getTracks().forEach(t => t.stop()); rtc.camStream = null; }
     document.getElementById('camPip').classList.add('hidden');
     document.getElementById('camVideo').srcObject = null;
+    document.getElementById('camBtn').classList.remove('active');
+    camEnabled = false;
     if (!screenEnabled) {
       document.getElementById('screenVideo').style.display = 'none';
       document.getElementById('stagePlaceholder').style.display = 'flex';
     }
-    document.getElementById('camBtn').classList.remove('active');
-    camEnabled = false;
     rtc.buildLocalStream();
-    await rtc.updateAllViewers();
+    if (isLive) await rtc.updateAllViewers();
     showToast('📷 Camera off');
   } else {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       rtc.camStream = stream;
       document.getElementById('camVideo').srcObject = stream;
-      document.getElementById('camPip').classList.remove('hidden');
       document.getElementById('camBtn').classList.add('active');
       camEnabled = true;
       if (!screenEnabled) {
-        const sv = document.getElementById('screenVideo');
-        sv.srcObject = stream;
-        sv.style.display = 'block';
+        document.getElementById('screenVideo').srcObject = stream;
+        document.getElementById('screenVideo').style.display = 'block';
         document.getElementById('stagePlaceholder').style.display = 'none';
+      } else {
+        document.getElementById('camPip').classList.remove('hidden');
       }
       rtc.buildLocalStream();
-      await rtc.updateAllViewers();
+      if (isLive) await rtc.updateAllViewers();
       showToast('📷 Camera on');
     } catch(e) {
-      showToast('❌ Camera access denied');
+      showToast('❌ Camera access denied. Check browser permissions.');
       console.error(e);
     }
   }
@@ -259,10 +299,8 @@ async function toggleCam() {
 
 // ── HOST: SCREEN SHARE ────────────────────────────────────────────────────────
 async function toggleScreen() {
-  if (!isLive) { showToast('⚠️ Go live first!'); return; }
   if (screenEnabled) {
     if (rtc.screenStream) { rtc.screenStream.getTracks().forEach(t => t.stop()); rtc.screenStream = null; }
-    document.getElementById('screenVideo').style.display = 'none';
     document.getElementById('screenBadge').classList.add('hidden');
     document.getElementById('screenBtn').classList.remove('active');
     screenEnabled = false;
@@ -271,18 +309,18 @@ async function toggleScreen() {
       document.getElementById('screenVideo').style.display = 'block';
       document.getElementById('camPip').classList.add('hidden');
     } else {
+      document.getElementById('screenVideo').style.display = 'none';
       document.getElementById('stagePlaceholder').style.display = 'flex';
     }
     rtc.buildLocalStream();
-    await rtc.updateAllViewers();
+    if (isLive) await rtc.updateAllViewers();
     showToast('🖥 Screen share stopped');
   } else {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
       rtc.screenStream = stream;
-      const sv = document.getElementById('screenVideo');
-      sv.srcObject = stream;
-      sv.style.display = 'block';
+      document.getElementById('screenVideo').srcObject = stream;
+      document.getElementById('screenVideo').style.display = 'block';
       document.getElementById('stagePlaceholder').style.display = 'none';
       document.getElementById('screenBadge').classList.remove('hidden');
       document.getElementById('screenBtn').classList.add('active');
@@ -290,7 +328,7 @@ async function toggleScreen() {
       if (camEnabled) document.getElementById('camPip').classList.remove('hidden');
       stream.getVideoTracks()[0].onended = () => { screenEnabled = true; toggleScreen(); };
       rtc.buildLocalStream();
-      await rtc.updateAllViewers();
+      if (isLive) await rtc.updateAllViewers();
       showToast('🖥 Screen sharing started');
     } catch(e) {
       showToast('Screen share cancelled');
@@ -326,8 +364,10 @@ function appendChat(msg) {
 }
 
 function appendSystemMsg(text) {
-  appendChat({ name: 'PulseStream', color: '#7c5cfc', isSystem: true, text,
-    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
+  appendChat({
+    name: 'PulseStream', color: '#7c5cfc', isSystem: true, text,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  });
 }
 
 // ── REACTIONS ─────────────────────────────────────────────────────────────────
@@ -362,7 +402,9 @@ function addPollOpt() {
 }
 
 function rmOpt(btn) {
-  if (document.getElementById('pollOptionsList').children.length <= 2) { showToast('Need at least 2 options'); return; }
+  if (document.getElementById('pollOptionsList').children.length <= 2) {
+    showToast('Need at least 2 options'); return;
+  }
   btn.closest('.poll-opt-row').remove();
 }
 
@@ -420,7 +462,9 @@ function renderPolls() {
 function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
 function copyStreamLink() {
-  navigator.clipboard.writeText(window.location.href).then(() => showToast('🔗 Link copied!'));
+  navigator.clipboard.writeText(window.location.href)
+    .then(() => showToast('🔗 Stream link copied!'))
+    .catch(() => showToast('Link: ' + window.location.href));
 }
 
 let toastTimer;
@@ -429,14 +473,12 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
 function esc(str) {
-  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
-function log(...args) { console.log('[PulseStream]', ...args); }
 
 document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.add('hidden'); });
