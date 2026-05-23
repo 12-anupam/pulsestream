@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PulseStream — Live Streaming</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="loadingScreen">
+  <div class="loader-inner">
+    <div class="logo-big">Pulse<span>●</span>Stream</div>
+    <div class="loader-bar"><div class="loader-fill"></div></div>
+    <p id="loadingMsg">Connecting to server...</p>
+  </div>
+</div>
+
+<nav id="mainNav" class="hidden">
+  <div class="logo">Pulse<span>●</span>Stream</div>
+  <div class="nav-center" id="streamTitleNav"></div>
+  <div class="nav-right">
+    <div class="viewer-pill" id="viewerPill">
+      <span class="dot-offline" id="statusDot"></span>
+      <span id="statusLabel">Offline</span>
+    </div>
+    <div class="role-badge" id="roleBadge"></div>
+  </div>
+</nav>
+
+<div class="app hidden" id="mainApp">
+  <!-- LEFT / MAIN -->
+  <div class="main-col">
+    <!-- STAGE -->
+    <div class="stage" id="stage">
+      <div class="stage-placeholder" id="stagePlaceholder">
+        <div class="pulse-ring"></div>
+        <div class="stage-icon">📡</div>
+        <p id="stagePlaceholderText">Waiting for stream to start...</p>
+      </div>
+      <video id="remoteVideo" autoplay playsinline style="display:none;width:100%;height:100%;object-fit:cover;background:#000"></video>
+      <video id="screenVideo" autoplay muted playsinline style="display:none;width:100%;height:100%;object-fit:cover;background:#000"></video>
+      <div class="live-badge hidden" id="liveBadge">
+        <span class="live-dot"></span>LIVE
+      </div>
+      <div class="screen-share-badge hidden" id="screenBadge">🖥 Screen Share</div>
+      <div class="cam-pip hidden" id="camPip">
+        <video id="camVideo" autoplay muted playsinline></video>
+        <div class="pip-label">CAM</div>
+      </div>
+      <div class="stage-overlay" id="stageOverlay"></div>
+    </div>
+
+    <!-- HOST CONTROLS (only visible to host) -->
+    <div class="controls host-only hidden" id="hostControls">
+      <div class="ctrl-group">
+        <button class="ctrl-btn" id="micBtn" onclick="toggleMic()" title="Microphone">
+          <span class="ctrl-icon">🎙</span>
+          <span class="ctrl-label">Mic</span>
+        </button>
+        <button class="ctrl-btn" id="camBtn" onclick="toggleCam()" title="Camera">
+          <span class="ctrl-icon">📷</span>
+          <span class="ctrl-label">Cam</span>
+        </button>
+        <button class="ctrl-btn" id="screenBtn" onclick="toggleScreen()" title="Share Screen">
+          <span class="ctrl-icon">🖥</span>
+          <span class="ctrl-label">Screen</span>
+        </button>
+      </div>
+      <div class="ctrl-sep"></div>
+      <div class="ctrl-group">
+        <button class="ctrl-btn" onclick="openPollModal()" title="Create Poll">
+          <span class="ctrl-icon">📊</span>
+          <span class="ctrl-label">Poll</span>
+        </button>
+        <button class="ctrl-btn" onclick="copyStreamLink()" title="Copy Stream Link">
+          <span class="ctrl-icon">🔗</span>
+          <span class="ctrl-label">Share</span>
+        </button>
+      </div>
+      <div class="ctrl-right">
+        <button class="btn btn-live" id="goLiveBtn" onclick="openGoLiveModal()">⚡ Go Live</button>
+        <button class="btn btn-end hidden" id="stopBtn" onclick="stopStream()">⬛ End Stream</button>
+      </div>
+    </div>
+
+    <!-- STREAM INFO -->
+    <div class="stream-info" id="streamInfo">
+      <div class="stream-title-row">
+        <h2 id="streamTitleDisplay">PulseStream</h2>
+        <div class="stream-meta-pills">
+          <span class="meta-pill cat-pill" id="categoryPill">📡 Waiting</span>
+          <span class="meta-pill view-pill hidden" id="viewPill">👁 <span id="viewCount">0</span></span>
+          <span class="meta-pill time-pill hidden" id="timePill">🕐 <span id="uptime">00:00</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- POLLS SECTION -->
+    <div class="polls-section">
+      <div class="section-header">
+        <span class="section-title">Live Polls</span>
+        <button class="host-only hidden new-poll-inline" id="newPollBtn" onclick="openPollModal()">+ New Poll</button>
+      </div>
+      <div id="pollsContainer">
+        <div class="polls-empty">No polls yet</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHAT SIDEBAR -->
+  <div class="chat-col">
+    <div class="chat-header">
+      <span class="chat-title">💬 Live Chat</span>
+      <span class="chat-viewer-count" id="chatViewerCount">0 viewers</span>
+    </div>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="reactions-bar">
+      <button class="react-btn" onclick="sendReaction('❤️')">❤️</button>
+      <button class="react-btn" onclick="sendReaction('🔥')">🔥</button>
+      <button class="react-btn" onclick="sendReaction('😂')">😂</button>
+      <button class="react-btn" onclick="sendReaction('👏')">👏</button>
+      <button class="react-btn" onclick="sendReaction('🚀')">🚀</button>
+      <button class="react-btn" onclick="sendReaction('💜')">💜</button>
+    </div>
+    <div class="chat-input-row">
+      <input class="chat-input" id="chatInput" placeholder="Say something..." maxlength="300"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){sendChat();event.preventDefault()}">
+      <button class="send-btn" onclick="sendChat()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m22 2-7 20-4-9-9-4 20-7z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- GO LIVE MODAL -->
+<div class="modal-overlay hidden" id="goLiveModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>⚡ Start Your Stream</h3>
+      <button class="modal-close" onclick="closeModal('goLiveModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Stream Title</label>
+        <input id="inputTitle" placeholder="What are you streaming today?" value="My Live Stream">
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <select id="inputCategory">
+          <option value="🎮 Gaming">🎮 Gaming</option>
+          <option value="💻 Tech & Coding">💻 Tech & Coding</option>
+          <option value="🎵 Music & Audio">🎵 Music & Audio</option>
+          <option value="🎨 Art & Design">🎨 Art & Design</option>
+          <option value="📚 Education">📚 Education</option>
+          <option value="🏋 Fitness">🏋 Fitness</option>
+          <option value="💬 Just Chatting">💬 Just Chatting</option>
+          <option value="🎬 Movies & TV">🎬 Movies & TV</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Description <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+        <textarea id="inputDesc" placeholder="Tell viewers what this stream is about..." rows="2"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('goLiveModal')">Cancel</button>
+      <button class="btn btn-live" onclick="startStream()">🔴 Go Live Now</button>
+    </div>
+  </div>
+</div>
+
+<!-- POLL MODAL -->
+<div class="modal-overlay hidden" id="pollModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>📊 Create Poll</h3>
+      <button class="modal-close" onclick="closeModal('pollModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Question</label>
+        <input id="pollQ" placeholder="Ask your audience something...">
+      </div>
+      <div class="field">
+        <label>Options</label>
+        <div id="pollOptionsList">
+          <div class="poll-opt-row"><input placeholder="Option 1" class="poll-opt-inp"><button class="rm-opt" onclick="rmOpt(this)">✕</button></div>
+          <div class="poll-opt-row"><input placeholder="Option 2" class="poll-opt-inp"><button class="rm-opt" onclick="rmOpt(this)">✕</button></div>
+        </div>
+        <button class="add-opt-btn" onclick="addPollOpt()">+ Add Option</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('pollModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitPoll()">Launch Poll 🚀</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast"></div>
+
+<!-- FLOATING REACTIONS CONTAINER -->
+<div id="reactionsContainer" style="position:fixed;inset:0;pointer-events:none;z-index:500;overflow:hidden"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/webrtc.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
