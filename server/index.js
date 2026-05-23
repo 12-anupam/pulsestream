@@ -6,12 +6,12 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  transports: ['websocket', 'polling']
 });
 
 app.use(express.static(path.join(__dirname, '../public')));
 
-// State
 let streamState = {
   isLive: false,
   title: '',
@@ -19,17 +19,17 @@ let streamState = {
   startedAt: null,
   hostId: null,
 };
-let viewers = new Map(); // socketId -> {name, color}
+
+let viewers = new Map();
 let polls = [];
 let chatHistory = [];
 
 const COLORS = ['#7c5cfc','#c084fc','#22c55e','#f59e0b','#ff3b5c','#06b6d4','#a78bfa','#fb923c'];
-const GUEST_NAMES = ['StargazerX','TechWizard99','NeonDreamer','PixelPirate','CosmoVibes','ByteRacer','AlphaWave','ShadowByte','NovaCoder','GlitchHero','PulseRider','ZeroLatency'];
+const NAMES = ['StargazerX','TechWizard','NeonDreamer','PixelPirate','CosmoVibes','ByteRacer','AlphaWave','ShadowByte','NovaCoder','GlitchHero','PulseRider','ZeroLag'];
 
 io.on('connection', (socket) => {
-  console.log('[+] Connected:', socket.id);
+  console.log('[+]', socket.id);
 
-  // Determine role
   const isHost = !streamState.hostId;
 
   if (isHost) {
@@ -37,25 +37,24 @@ io.on('connection', (socket) => {
     socket.join('host');
     socket.emit('role', { role: 'host' });
     socket.emit('stream-state', streamState);
-    console.log('[HOST] assigned to', socket.id);
+    console.log('[HOST]', socket.id);
   } else {
     socket.join('viewers');
-    const name = GUEST_NAMES[Math.floor(Math.random() * GUEST_NAMES.length)] + Math.floor(Math.random()*99+1);
+    const name = NAMES[Math.floor(Math.random() * NAMES.length)] + Math.floor(Math.random() * 99 + 1);
     const color = COLORS[Math.floor(Math.random() * COLORS.length)];
     viewers.set(socket.id, { name, color });
     socket.emit('role', { role: 'viewer', name, color });
     socket.emit('stream-state', streamState);
     socket.emit('chat-history', chatHistory.slice(-50));
     socket.emit('polls-update', polls);
-
     if (streamState.isLive) {
       io.to('host').emit('viewer-joined', { id: socket.id, name, color });
     }
     io.emit('viewer-count', viewers.size);
-    console.log('[VIEWER]', name, socket.id);
+    console.log('[VIEWER]', name);
   }
 
-  // HOST: Start stream
+  // Stream control
   socket.on('start-stream', (data) => {
     if (socket.id !== streamState.hostId) return;
     streamState.isLive = true;
@@ -63,19 +62,16 @@ io.on('connection', (socket) => {
     streamState.category = data.category || 'Just Chatting';
     streamState.startedAt = Date.now();
     io.emit('stream-started', streamState);
-    console.log('[STREAM] Started:', streamState.title);
   });
 
-  // HOST: Stop stream
   socket.on('stop-stream', () => {
     if (socket.id !== streamState.hostId) return;
     streamState.isLive = false;
     streamState.startedAt = null;
     io.emit('stream-stopped');
-    console.log('[STREAM] Stopped');
   });
 
-  // WebRTC Signaling: Host sends offer to a viewer
+  // WebRTC signaling — host sends offer to specific viewer
   socket.on('webrtc-offer', ({ to, offer }) => {
     io.to(to).emit('webrtc-offer', { from: socket.id, offer });
   });
@@ -85,12 +81,12 @@ io.on('connection', (socket) => {
     io.to(to).emit('webrtc-answer', { from: socket.id, answer });
   });
 
-  // ICE candidates exchange
+  // ICE candidates
   socket.on('webrtc-ice', ({ to, candidate }) => {
     io.to(to).emit('webrtc-ice', { from: socket.id, candidate });
   });
 
-  // Chat message
+  // Chat
   socket.on('chat-msg', (data) => {
     const isHostMsg = socket.id === streamState.hostId;
     const sender = isHostMsg
@@ -109,12 +105,12 @@ io.on('connection', (socket) => {
     io.emit('chat-msg', msg);
   });
 
-  // Reaction
+  // Reactions
   socket.on('reaction', (emoji) => {
-    io.emit('reaction', { emoji, from: socket.id });
+    io.emit('reaction', { emoji });
   });
 
-  // Poll create (host only)
+  // Polls
   socket.on('create-poll', (data) => {
     if (socket.id !== streamState.hostId) return;
     const poll = {
@@ -126,17 +122,18 @@ io.on('connection', (socket) => {
     };
     polls.push(poll);
     io.emit('polls-update', polls);
-    io.emit('chat-msg', {
+    const msg = {
       id: Date.now(),
       name: 'PulseStream',
       color: '#7c5cfc',
       isSystem: true,
-      text: `📊 New poll: ${poll.question}`,
+      text: '📊 New poll: ' + poll.question,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    });
+    };
+    chatHistory.push(msg);
+    io.emit('chat-msg', msg);
   });
 
-  // Vote on poll
   socket.on('vote-poll', ({ pollId, optionIndex }) => {
     const poll = polls.find(p => p.id === pollId);
     if (!poll || poll.voters.includes(socket.id)) return;
@@ -152,7 +149,7 @@ io.on('connection', (socket) => {
       streamState.isLive = false;
       io.emit('stream-stopped');
       io.emit('host-disconnected');
-      console.log('[HOST] disconnected, stream stopped');
+      console.log('[HOST disconnected]');
     } else {
       const v = viewers.get(socket.id);
       viewers.delete(socket.id);
@@ -164,7 +161,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`\n🟣 PulseStream running at http://localhost:${PORT}`);
-  console.log(`   Open this in your browser to go LIVE as the host.`);
-  console.log(`   Share the link with viewers — first connection = host.\n`);
+  console.log('🟣 PulseStream on port', PORT);
 });
